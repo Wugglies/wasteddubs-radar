@@ -1,0 +1,59 @@
+name: Trending clip radar
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 min (GitHub may delay runs a few minutes)
+  workflow_dispatch:
+    inputs:
+      game_name:
+        description: "Twitch category to watch (try 'Grand Theft Auto V' before launch)"
+        default: "Grand Theft Auto VI"
+      dry_run:
+        description: "1 = print alerts in the log instead of posting to Discord"
+        default: "0"
+
+permissions:
+  contents: write          # to commit state.json back
+
+concurrency:
+  group: radar
+  cancel-in-progress: false
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tests
+        run: |
+          pip install -q pytest
+          python -m pytest -q tests
+
+      - name: Run radar
+        env:
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GAME_NAME: ${{ inputs.game_name || vars.GAME_NAME || 'Grand Theft Auto VI' }}
+          DRY_RUN: ${{ inputs.dry_run || '0' }}
+          LOOKBACK_HOURS: ${{ vars.LOOKBACK_HOURS || '6' }}
+          MIN_VIEWS: ${{ vars.MIN_VIEWS || '50' }}
+          TOP_N: ${{ vars.TOP_N || '5' }}
+          LANGUAGES: ${{ vars.LANGUAGES || 'en' }}
+        run: python radar.py
+
+      - name: Save state
+        run: |
+          git config user.name "wasteddubs-radar"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet && exit 0
+          git commit -q -m "radar state [skip ci]"
+          for i in 1 2 3; do git pull -q --rebase && git push -q && exit 0; sleep 5; done
+          echo "state push failed"; exit 1
