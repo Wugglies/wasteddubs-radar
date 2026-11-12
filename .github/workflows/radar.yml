@@ -7,7 +7,7 @@ on:
     inputs:
       game_name:
         description: "Twitch category to watch (try 'Grand Theft Auto V' before launch)"
-        default: "Grand Theft Auto VI"
+        default: "Grand Theft Auto V"
       dry_run:
         description: "1 = print alerts in the log instead of posting to Discord"
         default: "0"
