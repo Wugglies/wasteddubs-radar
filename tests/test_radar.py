@@ -168,3 +168,26 @@ def test_corrupt_state_file_is_treated_as_empty(tmp_path):
     assert radar.load_state(str(p)) == {}
     p.write_text("{not json")
     assert radar.load_state(str(p)) == {}
+
+
+def test_merge_states_keeps_newest_views_and_never_drops_alerted_flag():
+    old = (NOW - timedelta(minutes=20)).isoformat()
+    new = NOW.isoformat()
+    remote = {"a": {"views": 10, "seen": old, "alerted": True},
+              "b": {"views": 50, "seen": new}}
+    ours = {"a": {"views": 99, "seen": new},
+            "b": {"views": 40, "seen": old, "alerted": True},
+            "c": {"views": 5, "seen": new}}
+    m = radar.merge_states(remote, ours)
+    assert m["a"] == {"views": 99, "seen": new, "alerted": True}
+    assert m["b"] == {"views": 50, "seen": new, "alerted": True}
+    assert m["c"]["views"] == 5
+
+
+def test_merge_state_files_cli(tmp_path):
+    import json
+    a, b = tmp_path / "remote.json", tmp_path / "ours.json"
+    a.write_text(json.dumps({"x": {"views": 1, "seen": NOW.isoformat(), "alerted": True}}))
+    b.write_text("{broken")
+    radar.merge_state_files(str(b), str(a))      # ours is corrupt -> keep remote
+    assert json.loads(a.read_text())["x"]["alerted"] is True

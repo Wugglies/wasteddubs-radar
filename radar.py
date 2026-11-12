@@ -119,6 +119,29 @@ def load_state(path):
         return {}
 
 
+def merge_states(remote, ours):
+    """Combine two runs' state: newest view count wins, alerted is sticky."""
+    out = {}
+    for cid in set(remote) | set(ours):
+        r, o = remote.get(cid), ours.get(cid)
+        if not r or not o:
+            out[cid] = dict(r or o)
+            continue
+        newer = o if o.get("seen", "") >= r.get("seen", "") else r
+        e = dict(newer)
+        if r.get("alerted") or o.get("alerted"):
+            e["alerted"] = True
+        out[cid] = e
+    return out
+
+
+def merge_state_files(ours_path, target_path):
+    """Merge this run's state (ours_path) into the checked-out remote file."""
+    merged = merge_states(load_state(target_path), load_state(ours_path))
+    with open(target_path, "w") as f:
+        json.dump(merged, f, separators=(",", ":"))
+
+
 def update_state(state, clips, alerted_ids, now, max_age_h=48):
     cutoff = now - timedelta(hours=max_age_h)
     new = {k: v for k, v in state.items()
@@ -245,7 +268,8 @@ def main():
     if not game_id:
         print(f"No Twitch category named {game_name!r} yet; nothing to do.")
         return 0
-    print(f"{game_name} -> game_id {game_id}")
+    print(f"{game_name} -> game_id {game_id} | lookback {hours}h, min views {min_views}, "
+          f"languages {sorted(langs) if langs else 'any'}, dry run {dry}")
 
     state = load_state(STATE_FILE)
     raw = fetch_clips(game_id, now, hours, cid, token)
@@ -253,7 +277,12 @@ def main():
     viewers = fetch_viewers({c["broadcaster_id"] for c in moments}, cid, token) if moments else {}
     scored = [score(c, now, state, viewers.get(c["broadcaster_id"])) for c in moments]
     alerts = select_alerts(scored, state, min_views, top_n, langs)
+    top = sorted(scored, key=lambda x: -x["score"])[:3]
     print(f"{len(raw)} clips -> {len(moments)} moments -> {len(alerts)} alerts")
+    for t in top:
+        c = t["clip"]
+        print(f"  top: {c['view_count']} views, {c.get('language')}, {c['broadcaster_name']}: "
+              f"{c['url']}")
 
     if alerts:
         payload = discord_payload(alerts, game_name)
@@ -269,4 +298,7 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--merge-state":
+        merge_state_files(sys.argv[2], sys.argv[3])
+        sys.exit(0)
     sys.exit(main())

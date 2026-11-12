@@ -52,8 +52,15 @@ jobs:
         run: |
           git config user.name "wasteddubs-radar"
           git config user.email "actions@users.noreply.github.com"
-          git add state.json
-          git diff --cached --quiet && exit 0
-          git commit -q -m "radar state [skip ci]"
-          for i in 1 2 3; do git pull -q --rebase && git push -q && exit 0; sleep 5; done
+          cp state.json "$RUNNER_TEMP/ours.json"
+          for i in 1 2 3 4; do
+            git fetch -q origin "$GITHUB_REF_NAME"
+            git reset -q --hard "origin/$GITHUB_REF_NAME"
+            python radar.py --merge-state "$RUNNER_TEMP/ours.json" state.json
+            git add state.json
+            git diff --cached --quiet && exit 0
+            git commit -q -m "radar state [skip ci]"
+            git push -q && exit 0
+            sleep $((i * 5))
+          done
           echo "state push failed"; exit 1
