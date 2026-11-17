@@ -10,7 +10,7 @@ Actions in this public repo, standard-library Python only.
    within 90 s). More viewers clipping it = small boost.
 3. Score = views/hour (since creation, or since the last run if faster), divided by
    √(1 + live viewers / 1000) so small streamers can surface.
-4. Post the top 5 new clips with ≥ 50 views, English only. Each clip alerts once.
+4. Post the top 5 new clips with ≥ 50 views, any language (voiceover replaces the talk). Each clip alerts once.
 
 ## Setup (all doable from a phone browser)
 1. **Twitch app:** dev.twitch.tv/console/apps → Register Your Application →
@@ -27,7 +27,7 @@ Actions in this public repo, standard-library Python only.
    dry_run `0` to get a real Discord alert.
 
 ## Tuning (Settings → Secrets and variables → Actions → Variables)
-`GAME_NAME`, `LOOKBACK_HOURS`, `MIN_VIEWS`, `TOP_N`, `LANGUAGES` (comma list, `*` = any language).
+`GAME_NAME`, `LOOKBACK_HOURS`, `MIN_VIEWS`, `TOP_N`, `LANGUAGES` (default `*` = any language; or a comma list like `en,es`).
 
 ## Notes
 - Twitch app tokens are fetched fresh each run; nothing to renew.

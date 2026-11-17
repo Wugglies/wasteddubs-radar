@@ -45,7 +45,7 @@ jobs:
           LOOKBACK_HOURS: ${{ vars.LOOKBACK_HOURS || '6' }}
           MIN_VIEWS: ${{ vars.MIN_VIEWS || '50' }}
           TOP_N: ${{ vars.TOP_N || '5' }}
-          LANGUAGES: ${{ vars.LANGUAGES || 'en' }}
+          LANGUAGES: ${{ vars.LANGUAGES || '*' }}
         run: python radar.py
 
       - name: Save state
