@@ -30,6 +30,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install face/cutscene check (optional)
+        continue-on-error: true      # if this fails, alerts still go out unchecked
+        run: pip install -q "opencv-python-headless<5" numpy
+
       - name: Tests
         run: |
           pip install -q pytest

@@ -10,7 +10,11 @@ Actions in this public repo, standard-library Python only.
    within 90 s). More viewers clipping it = small boost.
 3. Score = views/hour (since creation, or since the last run if faster), divided by
    √(1 + live viewers / 1000) so small streamers can surface.
-4. Post the top 5 new clips with ≥ 50 views, any language (voiceover replaces the talk). Each clip alerts once.
+4. Check the top ~20 candidates' thumbnails (free OpenCV, no AI service):
+   a real face near the left/right edge = streamer facecam → score x0.35
+   (sinks, still alerts if huge); black bars top and bottom = 🎬 cutscene tag
+   (only dub early, non-story ones: Rockstar's policy bans story/cutscene uploads).
+5. Post the top 5 new clips with ≥ 50 views, any language (voiceover replaces the talk). Each clip alerts once.
 
 ## Setup (all doable from a phone browser)
 1. **Twitch app:** dev.twitch.tv/console/apps → Register Your Application →

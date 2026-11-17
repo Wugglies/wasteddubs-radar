@@ -13,7 +13,9 @@ Env:
   LOOKBACK_HOURS default 6    MIN_VIEWS default 50    TOP_N default 5
   LANGUAGES      default "en" (comma list; "*" or "any" = no filter)
   DRY_RUN=1      print alerts instead of posting
-Standard library only.
+  VISUAL_CHECK   default 1: check each candidate's thumbnail - streamer
+                 facecam in a corner ranks lower, letterbox bars = cutscene tag
+Standard library + optional opencv-python-headless (visual check skipped without it).
 """
 import json
 import math
@@ -32,6 +34,8 @@ FMT = "%Y-%m-%dT%H:%M:%SZ"
 MIN_AGE_H = 0.25          # floor so a 1-minute-old clip can't divide by ~0
 SAME_MOMENT_VOD_S = 45    # clips this close in the same VOD are one moment
 SAME_MOMENT_TIME_S = 90   # fallback when vod_offset is missing
+FACECAM_PENALTY = 0.35    # facecam clips keep 35% of their score (sink, not vanish)
+FACECAM_EDGE = 0.30       # a face centred in the outer 30% each side = facecam
 
 
 # ---------------------------------------------------------------- pure logic
@@ -171,6 +175,10 @@ def discord_payload(alerts, game_name):
         ]
         if c.get("cluster_size", 1) > 1:
             lines.append(f"{c['cluster_size']} viewers clipped this moment")
+        if a.get("cutscene"):
+            lines.append("🎬 Looks like a cutscene: only dub early, non-story ones")
+        if a.get("facecam"):
+            lines.append("📷 Facecam spotted (full-height crop usually cuts it)")
         lines.append("Paste the link into Claude with a voice memo to make the Short.")
         e = {"title": c["title"][:250] or "Untitled clip", "url": c["url"],
              "description": "\n".join(lines)}
@@ -179,6 +187,86 @@ def discord_payload(alerts, game_name):
         embeds.append(e)
     content = f"🔥 {len(embeds)} trending {game_name} clip(s)"
     return {"content": content[:2000], "embeds": embeds}
+
+
+# ---------------------------------------------------------------- visual checks
+def is_letterboxed(img):
+    """Cinematic black bars top AND bottom with a lit picture between them."""
+    import numpy as np
+    g = img.mean(axis=2) if img.ndim == 3 else img
+    h = g.shape[0]
+    band = max(2, int(h * 0.08))
+    top, bot, mid = g[:band], g[-band:], g[int(h * 0.2):int(h * 0.8)]
+    # bars are uniformly black: no streetlights / HUD pixels in them (night scenes)
+    dark = lambda a: float(a.mean()) < 14 and float(np.std(a)) < 10 \
+        and float(np.percentile(a, 99.5)) < 40
+    return bool(dark(top) and dark(bot) and float(mid.mean()) > 30)
+
+
+_HAAR = None
+
+
+def _haar_detector(gray):
+    global _HAAR
+    import cv2
+    if _HAAR is None:
+        _HAAR = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    return list(_HAAR.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=6, minSize=(18, 18)))
+
+
+def has_facecam(img, detector=None):
+    """A real-looking face centred near the left/right edge = webcam overlay.
+    Faces in the middle are treated as game characters."""
+    import numpy as np
+    gray = img.mean(axis=2).astype(np.uint8) if img.ndim == 3 else img
+    w = gray.shape[1]
+    for (x, y, fw, fh) in (detector or _haar_detector)(gray):
+        cx = (x + fw / 2) / w
+        if cx < FACECAM_EDGE or cx > 1 - FACECAM_EDGE:
+            return True
+    return False
+
+
+def analyse_image_bytes(data, detector=None):
+    try:
+        import cv2
+        import numpy as np
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+    if img is None:
+        return None
+    return {"cutscene": is_letterboxed(img), "facecam": has_facecam(img, detector)}
+
+
+def apply_visual(scored, analyses):
+    out = []
+    for s in scored:
+        a = analyses.get(s["clip"]["id"])
+        s = dict(s)
+        if a:
+            # in a cutscene, faces near the edges are characters, not a webcam
+            s["cutscene"] = a["cutscene"]
+            s["facecam"] = a["facecam"] and not a["cutscene"]
+            if s["facecam"]:
+                s["score"] = s["score"] * FACECAM_PENALTY
+        out.append(s)
+    return out
+
+
+def rank_with_visual(pool, analyses, top_n):
+    """Re-rank only the clips whose thumbnails were checked."""
+    checked = apply_visual(pool, analyses)
+    return sorted(checked, key=lambda s: -s["score"])[:top_n]
+
+
+def visual_check_available():
+    """Needs OpenCV 4.x: OpenCV 5 moved the Haar face model out of the main package."""
+    try:
+        import cv2
+        return hasattr(cv2, "CascadeClassifier")
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------- network
@@ -245,6 +333,32 @@ def fetch_viewers(broadcaster_ids, cid, token):
     return out
 
 
+def fetch_bytes(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "wasteddubs-radar"})
+    with urllib.request.urlopen(req, timeout=6) as r:
+        return r.read(5_000_000)
+
+
+def analyse_thumbnails(candidates, budget_s=60):
+    out = {}
+    start = time.monotonic()
+    for s in candidates:
+        if time.monotonic() - start >= budget_s:
+            print("  thumbnail time budget used up; ranking the rest unchecked")
+            break
+        url = str(s["clip"].get("thumbnail_url") or "")
+        if not url.startswith("http"):
+            continue
+        try:
+            a = analyse_image_bytes(fetch_bytes(url))
+        except Exception as e:  # a bad thumbnail must never stop alerts
+            print(f"  thumbnail skipped for {s['clip']['id']}: {e}")
+            continue
+        if a:
+            out[s["clip"]["id"]] = a
+    return out
+
+
 def post_discord(url, payload):
     _http(url, data=json.dumps(payload).encode(),
           headers={"Content-Type": "application/json",
@@ -276,7 +390,16 @@ def main():
     moments = dedupe(raw)
     viewers = fetch_viewers({c["broadcaster_id"] for c in moments}, cid, token) if moments else {}
     scored = [score(c, now, state, viewers.get(c["broadcaster_id"])) for c in moments]
-    alerts = select_alerts(scored, state, min_views, top_n, langs)
+    visual = os.environ.get("VISUAL_CHECK", "1") == "1" and visual_check_available()
+    if visual:
+        pool = select_alerts(scored, state, min_views, top_n * 4, langs)
+        analyses = analyse_thumbnails(pool)
+        print(f"thumbnails checked: {len(analyses)}/{len(pool)} | facecam "
+              f"{sum(a['facecam'] for a in analyses.values())} | cutscene "
+              f"{sum(a['cutscene'] for a in analyses.values())}")
+        alerts = rank_with_visual(pool, analyses, top_n)
+    else:
+        alerts = select_alerts(scored, state, min_views, top_n, langs)
     top = sorted(scored, key=lambda x: -x["score"])[:3]
     print(f"{len(raw)} clips -> {len(moments)} moments -> {len(alerts)} alerts")
     for t in top:
