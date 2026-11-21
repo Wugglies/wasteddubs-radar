@@ -14,7 +14,11 @@ Actions in this public repo, standard-library Python only.
    a real face near the left/right edge = streamer facecam → score x0.35
    (sinks, still alerts if huge); black bars top and bottom = 🎬 cutscene tag
    (only dub early, non-story ones: Rockstar's policy bans story/cutscene uploads).
-5. Post the top 5 new clips with ≥ 50 views, any language (voiceover replaces the talk). Each clip alerts once.
+5. Vehicles first: planes, boats, cars, bikes and helicopters rank x2.0, other
+   clips x0.4 (a truly viral clip can still win). Found by title keywords (several
+   languages) and a free image detector (YOLOX from the OpenCV model zoo,
+   Apache-2.0), tested on real GTA VI clips: 6 of 7 vehicle frames caught.
+6. Post the top 5 new clips with ≥ 50 views, any language (voiceover replaces the talk). Each clip alerts once.
 
 ## Setup (all doable from a phone browser)
 1. **Twitch app:** dev.twitch.tv/console/apps → Register Your Application →
@@ -31,7 +35,7 @@ Actions in this public repo, standard-library Python only.
    dry_run `0` to get a real Discord alert.
 
 ## Tuning (Settings → Secrets and variables → Actions → Variables)
-`GAME_NAME`, `LOOKBACK_HOURS`, `MIN_VIEWS`, `TOP_N`, `LANGUAGES` (default `*` = any language; or a comma list like `en,es`).
+`GAME_NAME`, `LOOKBACK_HOURS`, `MIN_VIEWS`, `TOP_N`, `LANGUAGES` (default `*` = any language; or a comma list like `en,es`), `VEHICLES` (`0` turns vehicles-first off).
 
 ## Notes
 - Twitch app tokens are fetched fresh each run; nothing to renew.

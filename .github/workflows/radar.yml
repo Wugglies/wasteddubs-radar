@@ -34,6 +34,26 @@ jobs:
         continue-on-error: true      # if this fails, alerts still go out unchecked
         run: pip install -q "opencv-python-headless<5" numpy
 
+      - name: Cache vehicle detector model
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: yolox-2022nov-v1
+
+      - name: Download vehicle detector model (optional)
+        continue-on-error: true      # without it the radar falls back to title keywords
+        run: |
+          mkdir -p models
+          if [ ! -s models/yolox.onnx ]; then
+            # download to a temp name; only a full-size file becomes the model
+            curl -sSL --fail --retry 3 -o models/yolox.onnx.part \
+              https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/object_detection_yolox/object_detection_yolox_2022nov.onnx || true
+            size=$(stat -c %s models/yolox.onnx.part 2>/dev/null || echo 0)
+            echo "model bytes: $size"
+            if [ "$size" -gt 30000000 ]; then mv models/yolox.onnx.part models/yolox.onnx
+            else rm -f models/yolox.onnx.part; echo "model download failed; using titles only"; fi
+          fi
+
       - name: Tests
         run: |
           pip install -q pytest

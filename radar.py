@@ -15,6 +15,10 @@ Env:
   DRY_RUN=1      print alerts instead of posting
   VISUAL_CHECK   default 1: check each candidate's thumbnail - streamer
                  facecam in a corner ranks lower, letterbox bars = cutscene tag
+  VEHICLES       default 1: vehicles first - planes, boats, cars, bikes,
+                 helicopters (title keywords + YOLOX image detector) rank x2.0,
+                 other clips x0.4, so only a truly viral non-vehicle clip wins
+  MODEL_PATH     default models/yolox.onnx (downloaded by the workflow)
 Standard library + optional opencv-python-headless (visual check skipped without it).
 """
 import json
@@ -36,6 +40,21 @@ SAME_MOMENT_VOD_S = 45    # clips this close in the same VOD are one moment
 SAME_MOMENT_TIME_S = 90   # fallback when vod_offset is missing
 FACECAM_PENALTY = 0.35    # facecam clips keep 35% of their score (sink, not vanish)
 FACECAM_EDGE = 0.30       # a face centred in the outer 30% each side = facecam
+VEHICLE_BOOST = 2.0       # vehicle clips (title or image)
+NON_VEHICLE = 0.4         # everything else: x5 gap, a viral clip can still win
+VEHICLE_THRESHOLD = 0.4   # YOLOX score; tested on real GTA VI frames (6/7 hits, 0 false)
+MODEL_PATH = os.environ.get("MODEL_PATH", "models/yolox.onnx")
+COCO_VEHICLES = {4: "plane", 8: "boat", 2: "car", 3: "motorbike", 5: "bus", 7: "truck", 6: "train"}
+VEHICLE_EMOJI = {"plane": "✈️", "heli": "🚁", "boat": "🚤", "motorbike": "🏍️"}
+_VEHICLE_WORDS = (
+    r"planes?|airplanes?|jets?|pilots?|flight|flying|landing|heli|helis|helicopters?|choppers?|"
+    r"boats?|yachts?|jet ?skis?|ships?|cars?|trucks?|bikes?|motorbikes?|motorcycles?|"
+    r"drive|drives|driver|drivers|driving|chase|racing|race|"
+    r"avi[oó]n|barco|coche|carro|helic[oó]ptero|moto|"
+    r"самол[её]т|вертол[её]т|машина|тачка|лодка|"
+    r"flugzeug|auto|boot|hubschrauber")
+import re as _re
+_VEHICLE_RE = _re.compile(rf"(?<!\w)({_VEHICLE_WORDS})(?!\w)", _re.IGNORECASE)
 
 
 # ---------------------------------------------------------------- pure logic
@@ -175,6 +194,9 @@ def discord_payload(alerts, game_name):
         ]
         if c.get("cluster_size", 1) > 1:
             lines.append(f"{c['cluster_size']} viewers clipped this moment")
+        if a.get("vehicle"):
+            how = "spotted in the image" if a.get("vehicle_source") == "image" else "from the title"
+            lines.append(f"{VEHICLE_EMOJI.get(a['vehicle'], '🚗')} Vehicle: {a['vehicle']} ({how})")
         if a.get("cutscene"):
             lines.append("🎬 Looks like a cutscene: only dub early, non-story ones")
         if a.get("facecam"):
@@ -227,6 +249,49 @@ def has_facecam(img, detector=None):
     return False
 
 
+def _yolox_anchor_count(size=640):
+    return sum((size // st) ** 2 for st in (8, 16, 32))
+
+
+def yolox_vehicle_scores(out):
+    """YOLOX output (1, anchors, 85) -> best objectness x class score per vehicle."""
+    d = out[0]
+    obj = d[:, 4]
+    return {name: float((obj * d[:, 5 + cid]).max()) for cid, name in COCO_VEHICLES.items()}
+
+
+_NET = None
+
+
+def _vehicle_net():
+    global _NET
+    if _NET is None:
+        _NET = False
+        try:
+            import cv2
+            if os.path.exists(MODEL_PATH):
+                _NET = cv2.dnn.readNet(MODEL_PATH)
+        except Exception as e:  # corrupt/partial model: fall back to titles only
+            print(f"vehicle detector unavailable ({e.__class__.__name__}); using titles only")
+    return _NET or None
+
+
+def detect_vehicle(img):
+    """Letterbox to 640, run YOLOX (OpenCV zoo, Apache-2.0), return label or None."""
+    import cv2
+    import numpy as np
+    net = _vehicle_net()
+    if net is None:
+        return None
+    h, w = img.shape[:2]
+    r = min(640 / h, 640 / w)
+    canvas = np.full((640, 640, 3), 114, np.uint8)
+    canvas[:int(h * r), :int(w * r)] = cv2.resize(img, (int(w * r), int(h * r)))
+    rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32)
+    net.setInput(np.transpose(rgb, (2, 0, 1))[None])
+    return vehicle_from_scores(yolox_vehicle_scores(net.forward()))
+
+
 def analyse_image_bytes(data, detector=None):
     try:
         import cv2
@@ -236,7 +301,13 @@ def analyse_image_bytes(data, detector=None):
         return None
     if img is None:
         return None
-    return {"cutscene": is_letterboxed(img), "facecam": has_facecam(img, detector)}
+    a = {"cutscene": is_letterboxed(img), "facecam": has_facecam(img, detector)}
+    if os.environ.get("VEHICLES", "1") == "1" and _vehicle_net() is not None:
+        try:
+            a["vehicle"] = detect_vehicle(img)
+        except Exception:
+            a["vehicle"] = None
+    return a
 
 
 def apply_visual(scored, analyses):
@@ -254,9 +325,42 @@ def apply_visual(scored, analyses):
     return out
 
 
-def rank_with_visual(pool, analyses, top_n):
-    """Re-rank only the clips whose thumbnails were checked."""
-    checked = apply_visual(pool, analyses)
+def title_vehicle(title):
+    m = _VEHICLE_RE.search(title or "")
+    return m.group(1).lower() if m else None
+
+
+def vehicle_from_scores(scores, threshold=VEHICLE_THRESHOLD):
+    name, best = max(scores.items(), key=lambda kv: kv[1], default=(None, 0.0))
+    return name if best >= threshold else None
+
+
+def prelim_vehicle_boost(scored):
+    """Cheap first pass so title-vehicle clips make it into the checked pool.
+    Keeps the real score in base_score for the final ranking."""
+    out = []
+    for s in scored:
+        s = dict(s, base_score=s.get("base_score", s["score"]))
+        factor = VEHICLE_BOOST if title_vehicle(s["clip"].get("title")) else NON_VEHICLE
+        s["score"] = s["base_score"] * factor
+        out.append(s)
+    return out
+
+
+def rank_with_visual(pool, analyses, top_n, vehicles=True):
+    """Re-rank only the clips whose thumbnails were checked: facecam penalty,
+    then vehicles first (image detector, else title keyword)."""
+    base = [dict(s, score=s.get("base_score", s["score"])) for s in pool]
+    checked = apply_visual(base, analyses)
+    if vehicles:
+        for s in checked:
+            img = (analyses.get(s["clip"]["id"]) or {}).get("vehicle")
+            word = title_vehicle(s["clip"].get("title"))
+            if img:
+                s["vehicle"], s["vehicle_source"] = img, "image"
+            elif word:
+                s["vehicle"], s["vehicle_source"] = word, "title"
+            s["score"] *= VEHICLE_BOOST if s.get("vehicle") else NON_VEHICLE
     return sorted(checked, key=lambda s: -s["score"])[:top_n]
 
 
@@ -339,7 +443,7 @@ def fetch_bytes(url):
         return r.read(5_000_000)
 
 
-def analyse_thumbnails(candidates, budget_s=60):
+def analyse_thumbnails(candidates, budget_s=90):
     out = {}
     start = time.monotonic()
     for s in candidates:
@@ -391,15 +495,20 @@ def main():
     viewers = fetch_viewers({c["broadcaster_id"] for c in moments}, cid, token) if moments else {}
     scored = [score(c, now, state, viewers.get(c["broadcaster_id"])) for c in moments]
     visual = os.environ.get("VISUAL_CHECK", "1") == "1" and visual_check_available()
+    vehicles =os.environ.get("VEHICLES", "1") == "1"
+    if vehicles:
+        scored = prelim_vehicle_boost(scored)
     if visual:
-        pool = select_alerts(scored, state, min_views, top_n * 4, langs)
+        pool = select_alerts(scored, state, min_views, top_n * 6, langs)
         analyses = analyse_thumbnails(pool)
         print(f"thumbnails checked: {len(analyses)}/{len(pool)} | facecam "
               f"{sum(a['facecam'] for a in analyses.values())} | cutscene "
-              f"{sum(a['cutscene'] for a in analyses.values())}")
-        alerts = rank_with_visual(pool, analyses, top_n)
+              f"{sum(a['cutscene'] for a in analyses.values())} | vehicle "
+              f"{sum(bool(a.get('vehicle')) for a in analyses.values())} "
+              f"(detector {'on' if _vehicle_net() is not None else 'off: titles only'})")
     else:
-        alerts = select_alerts(scored, state, min_views, top_n, langs)
+        pool, analyses = select_alerts(scored, state, min_views, top_n * 6, langs), {}
+    alerts = rank_with_visual(pool, analyses, top_n, vehicles=vehicles)
     top = sorted(scored, key=lambda x: -x["score"])[:3]
     print(f"{len(raw)} clips -> {len(moments)} moments -> {len(alerts)} alerts")
     for t in top:
